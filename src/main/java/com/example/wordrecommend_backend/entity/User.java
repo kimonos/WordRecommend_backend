@@ -7,6 +7,7 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 
+import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.Collections;
 
@@ -27,6 +28,14 @@ public class User implements UserDetails {
 
     @Column(unique = true, nullable = false)
     private String email;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    @PrePersist // 這是 JPA 的一個強大功能
+    protected void onCreate() {
+        this.createdAt = LocalDateTime.now();
+    }
 
     // 以下是 UserDetails 介面的實作方法
     @Override

@@ -15,9 +15,12 @@ public class WordState {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // 外鍵：連結到 Word 表格
-    @ManyToOne(fetch = FetchType.EAGER)
-    @JoinColumn(name = "word_id", nullable = false)
+    @ManyToOne(fetch = FetchType.LAZY) // 多個 WordState 對應到一個 User
+    @JoinColumn(name = "user_id", nullable = false) // 指定外鍵欄位為 user_id
+    private User user;
+
+    @ManyToOne(fetch = FetchType.LAZY) // 多個 WordState 對應到一個 Word
+    @JoinColumn(name = "word_id", nullable = false) // 指定外鍵欄位為 word_id
     private Word word;
 
     // 核心值：記憶強度 M_i(t)，範圍 [0, 1]
@@ -36,9 +39,4 @@ public class WordState {
     // 計算出的出題優先度 P_i (越大越優先)
     @Column(name = "next_review_priority")
     private Double nextReviewPriority;
-
-    /**
-     * 注意：在未來納入使用者後，這個表格會增加 'user_id' 外鍵。
-     * 為了現在的單純演算法，我們可以假設這是「全域的單字狀態」。
-     */
 }

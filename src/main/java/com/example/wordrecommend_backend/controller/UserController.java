@@ -1,6 +1,6 @@
 package com.example.wordrecommend_backend.controller;
 
-import com.example.wordrecommend_backend.dto.AuthRequest; // 下面會建立
+import com.example.wordrecommend_backend.dto.LoginRequest; // 下面會建立
 import com.example.wordrecommend_backend.dto.AuthResponse; // 下面會建立
 import com.example.wordrecommend_backend.entity.User;
 import com.example.wordrecommend_backend.service.UserService;
@@ -9,46 +9,23 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequestMapping("/api/users")
-@RequiredArgsConstructor
+@RequestMapping("/users")
 public class UserController {
 
-    private final UserService userService;
-    private final AuthenticationManager authenticationManager;
-    private final UserDetailsService userDetailsService;
-    private final JwtUtil jwtUtil;
-
-    @PostMapping("/register")
-    public ResponseEntity<?> registerUser(@RequestBody User user) {
-        try {
-            User registeredUser = userService.registerUser(user);
-            return ResponseEntity.ok(registeredUser);
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
+    // 這個 API 是受保護的，只有登入的使用者才能存取
+    @GetMapping("/me")
+    public ResponseEntity<User> getCurrentUser(
+            @AuthenticationPrincipal User currentUser) {
+        // @AuthenticationPrincipal 是 Spring Security 的一個強大功能
+        // 它可以直接將已認證的使用者物件注入到方法參數中
+        return ResponseEntity.ok(currentUser);
     }
 
-    @PostMapping("/login")
-    public ResponseEntity<?> createAuthenticationToken(@RequestBody AuthRequest authRequest) throws Exception {
-        try {
-            authenticationManager.authenticate(
-                    new UsernamePasswordAuthenticationToken(authRequest.getUsername(), authRequest.getPassword())
-            );
-        } catch (Exception e) {
-            throw new Exception("Incorrect username or password", e);
-        }
-
-        final UserDetails userDetails = userDetailsService.loadUserByUsername(authRequest.getUsername());
-        final String jwt = jwtUtil.generateToken(userDetails);
-
-        return ResponseEntity.ok(new AuthResponse(jwt));
-    }
+    // 我們將在後續步驟中加入 PUT /me 和 DELETE /me
 }
