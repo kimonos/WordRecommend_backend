@@ -14,7 +14,13 @@ import java.util.Optional;
 public interface WordStateRepository extends JpaRepository<WordState, Long> {
 
     Optional<WordState> findByUserAndWord(User user, Word word);
+//
+//    @Query("SELECT ws FROM WordState ws WHERE ws.user = :user AND ws.currentState IN ('S1', 'S2', 'S3') ORDER BY ws.nextReviewPriority DESC")
+//    List<WordState> findReviewWords(@Param("user") User user, Pageable pageable); // 這裡的 Pageable 現在是正確的類型了
+    @Query("SELECT ws FROM WordState ws WHERE ws.user = :user AND ws.currentState = :state ORDER BY function('RANDOM')")
+    List<WordState> findByUserAndState(@Param("user") User user, @Param("state") String state, Pageable pageable);
 
-    @Query("SELECT ws FROM WordState ws WHERE ws.user = :user AND ws.currentState IN ('S1', 'S2', 'S3') ORDER BY ws.nextReviewPriority DESC")
-    List<WordState> findReviewWords(@Param("user") User user, Pageable pageable); // 這裡的 Pageable 現在是正確的類型了
+    @Query("SELECT COUNT(ws) FROM WordState ws WHERE ws.user = :user AND ws.currentState = :state")
+    long countByUserAndState(@Param("user") User user, @Param("state") String state);
+
 }

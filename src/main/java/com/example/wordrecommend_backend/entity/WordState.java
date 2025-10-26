@@ -39,4 +39,19 @@ public class WordState {
     // 計算出的出題優先度 P_i (越大越優先)
     @Column(name = "next_review_priority")
     private Double nextReviewPriority;
+
+    @Column(name = "last_read_time")
+    private LocalDateTime lastReadTime;
+
+    // 累計閱讀次數
+    @Column(name = "read_count", nullable = false)
+    private Integer readCount = 0;
+
+    // 閱讀總時間（秒）
+    @Column(name = "total_read_duration", nullable = false)
+    private Double totalReadDuration = 0.0;
+
+    // 平均閱讀時間（自動計算或方便查詢）
+    @Column(name = "avg_read_duration", nullable = false)
+    private Double avgReadDuration = 0.0;
 }

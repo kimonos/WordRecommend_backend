@@ -58,40 +58,40 @@ public class ReviewService {
 //        // 【核心修正】使用 InteractionType.READ Enum，而不是 "READ" 字串
 //        saveReviewHistory(user, word, InteractionType.READ, request.getDurationMs(), null, LocalDateTime.now());
 //    }
-    @Transactional
-    public void recordReadEvent(User user, Word word) {
-        LocalDateTime now = LocalDateTime.now();
+@Transactional
+public void recordReadEvent(User user, Word word, long durationMs) {
+    LocalDateTime now = LocalDateTime.now();
 
-        // 1. 記錄閱讀歷史 (邏輯不變)
-        saveReviewHistory(user, word, InteractionType.READ, 0, null, now);
+    saveReviewHistory(user, word, InteractionType.READ, 0, null, now);
 
-        // 2. 執行「持續微增長」邏輯
-        WordState currentState = wordStateRepository.findByUserAndWord(user, word)
-                .orElseGet(() -> initializeNewState(user, word));
+    WordState state = wordStateRepository.findByUserAndWord(user, word)
+            .orElseGet(() -> initializeNewState(user, word));
 
-        // 【核心升級】無論當前是什麼狀態，每一次 READ 都會產生影響
+    // 更新閱讀累計/平均（若你有這些欄位）
+    int cnt = (state.getReadCount() == null ? 0 : state.getReadCount()) + 1;
+    double total = (state.getTotalReadDuration() == null ? 0.0 : state.getTotalReadDuration()) + durationMs / 1000.0;
+    state.setReadCount(cnt);
+    state.setTotalReadDuration(total);
+    state.setAvgReadDuration(total / cnt);
 
-        // a. 如果是第一次接觸 (S0)，進行「播種」
-        if ("S0".equals(currentState.getCurrentState())) {
-            currentState.setCurrentState("S1");
-            currentState.setMemoryStrength(0.1); // 給予一個基礎印象分
-        }
-        // b. 如果已經有印象了 (S1, S2, S3)，進行「微增長」
-        else {
-            double currentStrength = currentState.getMemoryStrength();
-            double passiveLearningFactor = 0.05; // 這可以是一個可配置的參數
-
-            // 應用公式：新的強度 = 舊的強度 + 學習因子 * (1 - 舊的強度)
-            double newStrength = currentStrength + passiveLearningFactor * (1 - currentStrength);
-
-            // 確保強度不會超過 1.0
-            currentState.setMemoryStrength(Math.min(1.0, newStrength));
-        }
-
-        // 無論是哪種情況，都更新最後互動時間
-        currentState.setLastReviewTime(now);
-        wordStateRepository.save(currentState);
+    // 微增長（保持你原本的邏輯）
+    if ("S0".equals(state.getCurrentState())) {
+        state.setCurrentState("S1");
+        state.setMemoryStrength(0.1);
+    } else {
+        double current = state.getMemoryStrength() == null ? 0.0 : state.getMemoryStrength();
+        double passive = 0.05;
+        double newStrength = Math.min(1.0, current + passive * (1 - current));
+        state.setMemoryStrength(newStrength);
     }
+
+    // 記錄最後閱讀時間
+    state.setLastReadTime(now);
+    state.setLastReviewTime(now);
+
+    wordStateRepository.save(state);
+}
+
 
     private WordState initializeNewState(User user, Word word) {
         WordState newState = new WordState();
