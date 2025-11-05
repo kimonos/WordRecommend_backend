@@ -15,25 +15,22 @@ public class UserService {
     private final PasswordEncoder passwordEncoder;
 
     public User register(RegisterRequest registerRequest) {
-        // 1. 檢查使用者名稱是否已被使用
-        if (userRepository.existsByUsername(registerRequest.getUsername())) {
+        // 1) 檢查暱稱是否已被使用（忽略大小寫）
+        if (userRepository.existsByUsernameIgnoreCase(registerRequest.getUsername())) {
             throw new IllegalArgumentException("錯誤：使用者名稱已被註冊！");
         }
-
-        // 2. 檢查 Email 是否已被使用
-        if (userRepository.existsByEmail(registerRequest.getEmail())) {
+        // 2) 檢查 Email 是否已被使用（忽略大小寫）
+        if (userRepository.existsByEmailIgnoreCase(registerRequest.getEmail())) {
             throw new IllegalArgumentException("錯誤：此 Email 已被註冊！");
         }
 
-        // 3. 建立新的 User 物件
+        // 3) 建立使用者
         User user = new User();
         user.setUsername(registerRequest.getUsername());
         user.setEmail(registerRequest.getEmail());
-
-        // 4. 將密碼加密後再設定
         user.setPassword(passwordEncoder.encode(registerRequest.getPassword()));
 
-        // 5. 存入資料庫並回傳
+        // 4) 存入
         return userRepository.save(user);
     }
 }

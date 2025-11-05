@@ -1,291 +1,653 @@
 package com.example.wordrecommend_backend.service;
 
 import com.example.wordrecommend_backend.dto.WordDTO;
-import com.example.wordrecommend_backend.entity.User;
-import com.example.wordrecommend_backend.entity.Word;
-import com.example.wordrecommend_backend.entity.WordState;
+import com.example.wordrecommend_backend.entity.*;
+import com.example.wordrecommend_backend.repository.ReviewHistoryRepository;
 import com.example.wordrecommend_backend.repository.WordRepository;
 import com.example.wordrecommend_backend.repository.WordStateRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.*;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
-@Service  // 標示這是 Spring 的服務層元件，會被自動掃描並註冊為 Bean
-@RequiredArgsConstructor  // Lombok 註解：自動產生包含所有 final 欄位的建構子（用於依賴注入）
+@Service
+@RequiredArgsConstructor
+@Slf4j
 public class RecommendationService {
 
-    // 注入 Word 資料表的存取介面
     private final WordRepository wordRepository;
-    // 注入 WordState 資料表的存取介面（記錄使用者對每個單字的學習狀態）
     private final WordStateRepository wordStateRepository;
+    private final ReviewHistoryRepository reviewHistoryRepository;
+    private final AlgorithmCoreService algorithmCoreService;
+
+    // ==================== 公開方法：推薦單字（v2.0 - Phase 5）====================
 
     /**
-     * 核心方法：為使用者推薦單字
+     * 核心方法：為使用者推薦單字（v2.0 - 輕量版）
+     *
+     * 設計理念：
+     * - 探索為主（新單字為主）
+     * - 學習閉環（適量舊單字）
+     * - 遺忘提醒（S-1 單字輕度提醒）
+     * - 動態調整（根據新單字剩餘量）
+     *
      * @param user 目標使用者
      * @param limit 需要推薦的單字數量
      * @return 推薦的單字列表（包含狀態資訊）
      */
-    @Transactional(readOnly = true)  // 標示為唯讀交易，優化資料庫效能
+    @Transactional(readOnly = true)
     public List<WordDTO> getWordRecommendations(User user, int limit) {
-        // 如果請求數量 <= 0，直接回傳空列表
         if (limit <= 0) return Collections.emptyList();
 
-        // ========== 步驟 1：統計使用者的學習狀態 ==========
-        // 計算使用者在 S1 狀態的單字數量（剛學習）
-        long countS1 = wordStateRepository.countByUserAndState(user, "S1");
-        // 計算使用者在 S2 狀態的單字數量（複習中）
-        long countS2 = wordStateRepository.countByUserAndState(user, "S2");
-        // 計算使用者在 S3 狀態的單字數量（熟練）
-        long countS3 = wordStateRepository.countByUserAndState(user, "S3");
-        // 計算總共學過多少單字（不包含 S0 新單字）
-        double totalLearned = countS1 + countS2 + countS3;
+        LocalDateTime currentTime = LocalDateTime.now();
 
-        // ========== 步驟 2：根據學習進度決定狀態比例 ==========
-        // 使用 LinkedHashMap 保持插入順序
+        // ========== 步驟 1：統計使用者的學習狀態 ==========
+        long countS_1 = wordStateRepository.countForgottenWords(user);
+        long countS1 = wordStateRepository.countByUserAndState(user, "S1");
+        long countS2 = wordStateRepository.countByUserAndState(user, "S2");
+        long countS3 = wordStateRepository.countByUserAndState(user, "S3");
+        double totalLearned = countS_1 + countS1 + countS2 + countS3;
+
+        log.info("User {} learning stats: S-1={}, S1={}, S2={}, S3={}, total={}",
+                user.getId(), countS_1, countS1, countS2, countS3, totalLearned);
+
+        // ========== 步驟 2：根據學習進度和新單字剩餘量決定狀態比例 ==========
         Map<String, Double> stateRatio = new LinkedHashMap<>();
 
-        // 如果學過的單字少於 50 個（新手階段）
         if (totalLearned < 50) {
-            stateRatio.put("S0", 1.0);  // 100% 推薦新單字
-            stateRatio.put("S1", 0.0);  // 0% 複習 S1
-            stateRatio.put("S2", 0.0);  // 0% 複習 S2
-            stateRatio.put("S3", 0.0);  // 0% 複習 S3
+            // 新手階段：100% 推薦新單字
+            stateRatio.put("S0", 1.0);
+            stateRatio.put("S-1", 0.0);
+            stateRatio.put("S1", 0.0);
+            stateRatio.put("S2", 0.0);
+            stateRatio.put("S3", 0.0);
+
+            log.debug("Beginner mode: 100% new words");
+
         } else {
-            // 進階階段：新單字 + 複習混合
-            stateRatio.put("S0", 0.5);  // 50% 新單字
-            stateRatio.put("S1", 0.2);  // 20% 複習 S1（剛學的）
-            stateRatio.put("S2", 0.2);  // 20% 複習 S2（複習中的）
-            stateRatio.put("S3", 0.1);  // 10% 複習 S3（熟練的）
-        }
+            // 進階階段：根據新單字剩餘量動態調整
 
-        // ========== 步驟 3：使用最大餘數法分配各狀態的配額 ==========
-        // 將 limit 個單字按照 stateRatio 比例分配給各狀態
-        Map<String, Integer> stateCounts = distributeCounts(limit, stateRatio);
-        // 取得 S0（新單字）應分配的數量，如果 Map 中沒有則預設為 0
-        int numS0 = stateCounts.getOrDefault("S0", 0);
-        // 取得 S1（剛學習）應分配的數量
-        int numS1 = stateCounts.getOrDefault("S1", 0);
-        // 取得 S2（複習中）應分配的數量
-        int numS2 = stateCounts.getOrDefault("S2", 0);
-        // 取得 S3（熟練）應分配的數量
-        int numS3 = stateCounts.getOrDefault("S3", 0);
+            // 🔑 查詢新單字剩餘數量（精確查詢）
+            long availableNewWords = wordRepository.countNewWords(user);
 
-        // ========== 步驟 4：動態調整 S0 新單字的難度等級比例 ==========
-        // 計算學習進度（0.0 ~ 1.0），最多到 300 個單字就算 100%
-        double progress = Math.min(totalLearned / 300.0, 1.0);
+            log.info("User {} has {} new words available (out of total learned: {})",
+                    user.getId(), availableNewWords, (long)totalLearned);
 
-        // 根據進度調整各難度等級的比例（進度越高，越推薦高難度）
-        Map<String, Double> levelRatio = new LinkedHashMap<>();
-        levelRatio.put("A1", 0.30 - 0.20 * progress);  // A1：30% → 10%（隨進度降低）
-        levelRatio.put("A2", 0.25 - 0.15 * progress);  // A2：25% → 10%
-        levelRatio.put("B1", 0.20 - 0.05 * progress);  // B1：20% → 15%
-        levelRatio.put("B2", 0.15 - 0.05 * progress);  // B2：15% → 10%
-        levelRatio.put("C1", 0.07 + 0.25 * progress);  // C1：7%  → 32%（隨進度提高）
-        levelRatio.put("C2", 0.03 + 0.20 * progress);  // C2：3%  → 23%（隨進度提高）
+            // 🔑 關鍵判斷：新單字是否完全耗盡
+            if (availableNewWords == 0) {
+                // ========== 情境 D：新單字完全耗盡 - 純複習模式 ==========
+                stateRatio.put("S0", 0.0);   // 0% 新單字
+                stateRatio.put("S-1", 0.20); // 優先復原遺忘單字
+                stateRatio.put("S1", 0.35);  // 複習不熟的
+                stateRatio.put("S2", 0.30);  // 複習中等的
+                stateRatio.put("S3", 0.15);  // 維持精通的
 
-        // 將 S0 的配額再按難度等級分配
-        Map<String, Integer> s0LevelCounts = distributeCounts(numS0, levelRatio);
+                log.info("Strategy: Pure Review Mode (no new words available)");
 
-        // ========== 步驟 5：從資料庫取出各類單字 ==========
+            } else {
+                // 還有新單字，根據剩餘比例動態調整
+                double newWordRatio = (double)availableNewWords / (totalLearned + availableNewWords);
 
-        // 5.1 取 S0 新單字（按難度等級分別取）
-        List<Word> s0Words = new ArrayList<>();
-        // 遍歷每個難度等級及其配額
-        for (Map.Entry<String, Integer> e : s0LevelCounts.entrySet()) {
-            int take = e.getValue();  // 該難度等級應取的數量
-            if (take <= 0) continue;  // 如果配額為 0，跳過
-            // 從資料庫查詢該難度等級的新單字，並加入列表
-            s0Words.addAll(wordRepository.findNewWordsByLevel(user, e.getKey(), page(take)));
-        }
+                log.debug("New word ratio: {:.2f}%", newWordRatio * 100);
 
-        // 5.2 取 S1 單字（剛學習的單字）
-        List<Word> s1Words = numS1 > 0  // 如果 S1 配額 > 0
-                ? wordStateRepository.findByUserAndState(user, "S1", page(numS1))  // 查詢 S1 單字
-                .stream()  // 轉成 Stream
-                .map(WordState::getWord)  // 從 WordState 取出 Word 物件
-                .collect(Collectors.toList())  // 收集成 List
-                : new ArrayList<>();  // 否則回傳空列表
+                double s1Ratio = (countS_1 > 0) ? 0.05 : 0.0;
 
-        // 5.3 取 S2 單字（複習中的單字）
-        List<Word> s2Words = numS2 > 0
-                ? wordStateRepository.findByUserAndState(user, "S2", page(numS2))
-                .stream().map(WordState::getWord).collect(Collectors.toList())
-                : new ArrayList<>();
+                if (newWordRatio > 0.5) {
+                    // ========== 情境 A：新單字充足（>50%）- 探索為主 ==========
+                    stateRatio.put("S0", 0.60);
+                    stateRatio.put("S-1", s1Ratio);
+                    stateRatio.put("S1", 0.15);
+                    stateRatio.put("S2", 0.15);
+                    stateRatio.put("S3", 0.05);
 
-        // 5.4 取 S3 單字（熟練的單字）
-        List<Word> s3Words = numS3 > 0
-                ? wordStateRepository.findByUserAndState(user, "S3", page(numS3))
-                .stream().map(WordState::getWord).collect(Collectors.toList())
-                : new ArrayList<>();
+                    log.debug("Strategy: Exploration (60% new words)");
 
-        // ========== 步驟 6：合併所有單字並去重 ==========
+                } else if (newWordRatio > 0.2) {
+                    // ========== 情境 B：新單字減少（20-50%）- 平衡模式 ==========
+                    stateRatio.put("S0", 0.40);
+                    stateRatio.put("S-1", Math.max(s1Ratio, 0.10));
+                    stateRatio.put("S1", 0.20);
+                    stateRatio.put("S2", 0.20);
+                    stateRatio.put("S3", 0.10);
 
-        // 預先分配足夠的空間，避免動態擴容
-        List<Word> merged = new ArrayList<>(s0Words.size() + s1Words.size() + s2Words.size() + s3Words.size());
-        // 按順序加入各狀態的單字
-        merged.addAll(s0Words);
-        merged.addAll(s1Words);
-        merged.addAll(s2Words);
-        merged.addAll(s3Words);
-        // 去除重複的單字（根據 ID）
-        List<Word> deduped = deduplicateById(merged);
+                    log.debug("Strategy: Balanced (40% new words)");
 
-        // 如果去重後數量不足，用隨機新單字補充
-        if (deduped.size() < limit) {
-            int missing = limit - deduped.size();  // 計算還缺多少
-            // 隨機取新單字
-            for (Word w : wordRepository.findNewWordsRandomly(user, page(missing))) {
-                // 檢查是否已存在（避免重複）
-                if (deduped.stream().noneMatch(x -> Objects.equals(x.getId(), w.getId()))) {
-                    deduped.add(w);  // 加入新單字
-                    if (deduped.size() == limit) break;  // 達到目標數量就停止
+                } else {
+                    // ========== 情境 C：新單字稀少（<20%）- 複習為主但保留探索 ==========
+                    // 🔑 動態計算新單字比例（確保所有新單字都有機會被學到）
+                    double newRatio = Math.max(0.15, Math.min(0.30, newWordRatio * 1.5));
+
+                    stateRatio.put("S0", newRatio);
+                    stateRatio.put("S-1", 0.15);
+                    stateRatio.put("S1", (1 - newRatio - 0.15) * 0.45);
+                    stateRatio.put("S2", (1 - newRatio - 0.15) * 0.40);
+                    stateRatio.put("S3", (1 - newRatio - 0.15) * 0.15);
+
+                    log.debug("Strategy: Review-focused ({:.1f}% new words, {} available)",
+                            newRatio * 100, availableNewWords);
                 }
             }
         }
 
-        // 嚴格截斷至 limit（保險措施，防止超出）
+        // ========== 步驟 3：分配各狀態的配額 ==========
+        Map<String, Integer> stateCounts = distributeCounts(limit, stateRatio);
+        int numS0 = stateCounts.getOrDefault("S0", 0);
+        int numS_1 = stateCounts.getOrDefault("S-1", 0);
+        int numS1 = stateCounts.getOrDefault("S1", 0);
+        int numS2 = stateCounts.getOrDefault("S2", 0);
+        int numS3 = stateCounts.getOrDefault("S3", 0);
+
+        log.debug("Quota allocation: S0={}, S-1={}, S1={}, S2={}, S3={}",
+                numS0, numS_1, numS1, numS2, numS3);
+
+        // ========== 步驟 4：動態調整 S0 新單字的難度等級比例 ==========
+        double progress = sigmoid(totalLearned, 750.0, 0.02);
+        Map<String, Double> levelRatio = new LinkedHashMap<>();
+        levelRatio.put("A1", 0.30 - 0.20 * progress);
+        levelRatio.put("A2", 0.25 - 0.15 * progress);
+        levelRatio.put("B1", 0.20 - 0.05 * progress);
+        levelRatio.put("B2", 0.15 - 0.05 * progress);
+        levelRatio.put("C1", 0.07 + 0.25 * progress);
+        levelRatio.put("C2", 0.03 + 0.20 * progress);
+
+        Map<String, Integer> s0LevelCounts = distributeCounts(numS0, levelRatio);
+
+        // ========== 步驟 5：從資料庫取出各類單字 ==========
+
+        // 5.1 取 S0 新單字（按難度等級分別取，隨機排序）
+        List<Word> s0Words = new ArrayList<>();
+        for (Map.Entry<String, Integer> e : s0LevelCounts.entrySet()) {
+            int take = e.getValue();
+            if (take <= 0) continue;
+            s0Words.addAll(wordRepository.findNewWordsByLevel(user, e.getKey(), page(take)));
+        }
+
+        // 5.2 取 S-1 單字（遺忘單字，輕度優先度排序）
+        List<Word> s_1Words = fetchWordsWithPriority(
+                user, "S-1", numS_1, currentTime,
+                () -> wordStateRepository.findForgottenWords(user, PageRequest.of(0, Math.max(numS_1 * 2, 10)))
+        );
+
+        // 5.3 取 S1 單字（輕度優先度排序）
+        List<Word> s1Words = fetchWordsWithPriority(
+                user, "S1", numS1, currentTime,
+                () -> wordStateRepository.findByUserAndState(user, "S1", PageRequest.of(0, Math.max(numS1 * 2, 10)))
+        );
+
+        // 5.4 取 S2 單字（輕度優先度排序）
+        List<Word> s2Words = fetchWordsWithPriority(
+                user, "S2", numS2, currentTime,
+                () -> wordStateRepository.findByUserAndState(user, "S2", PageRequest.of(0, Math.max(numS2 * 2, 10)))
+        );
+
+        // 5.5 取 S3 單字（隨機即可，已精通）
+        List<Word> s3Words = new ArrayList<>();
+        if (numS3 > 0) {
+            s3Words = wordStateRepository.findByUserAndState(user, "S3", page(numS3))
+                    .stream()
+                    .map(WordState::getWord)
+                    .collect(Collectors.toList());
+        }
+
+        // ========== 步驟 6：合併所有單字並去重 ==========
+        List<Word> merged = new ArrayList<>(
+                s0Words.size() + s_1Words.size() + s1Words.size() + s2Words.size() + s3Words.size()
+        );
+        merged.addAll(s0Words);
+        merged.addAll(s_1Words);
+        merged.addAll(s1Words);
+        merged.addAll(s2Words);
+        merged.addAll(s3Words);
+
+        List<Word> deduped = deduplicateById(merged);
+
+        // ========== 步驟 6.5：智能遞補（如果數量不足）==========
+        if (deduped.size() < limit) {
+            int missing = limit - deduped.size();
+            log.warn("Insufficient words: got {}, need {}, missing {}",
+                    deduped.size(), limit, missing);
+
+            // 🔑 遞補策略：優先順序
+            // 1. 新單字（如果還有）
+            // 2. S-1 遺忘單字
+            // 3. S1 不熟的單字
+            // 4. S2 複習中的單字
+            // 5. S3 精通的單字
+
+            // 嘗試 1：補充新單字
+            if (missing > 0) {
+                List<Word> extraNewWords = wordRepository.findNewWordsRandomly(user, page(missing * 2));
+                for (Word w : extraNewWords) {
+                    if (deduped.stream().noneMatch(x -> Objects.equals(x.getId(), w.getId()))) {
+                        deduped.add(w);
+                        missing--;
+                        if (missing == 0) break;
+                    }
+                }
+                log.debug("After adding new words: {} words, missing {}", deduped.size(), missing);
+            }
+
+            // 嘗試 2：補充 S-1 遺忘單字
+            if (missing > 0 && countS_1 > 0) {
+                List<WordState> extraS_1 = wordStateRepository.findForgottenWords(
+                        user, PageRequest.of(0, missing * 2)
+                );
+                for (WordState ws : extraS_1) {
+                    Word w = ws.getWord();
+                    if (deduped.stream().noneMatch(x -> Objects.equals(x.getId(), w.getId()))) {
+                        deduped.add(w);
+                        missing--;
+                        if (missing == 0) break;
+                    }
+                }
+                log.debug("After adding S-1 words: {} words, missing {}", deduped.size(), missing);
+            }
+
+            // 嘗試 3：補充 S1 單字
+            if (missing > 0 && countS1 > 0) {
+                List<WordState> extraS1 = wordStateRepository.findByUserAndState(
+                        user, "S1", PageRequest.of(0, missing * 2)
+                );
+                for (WordState ws : extraS1) {
+                    Word w = ws.getWord();
+                    if (deduped.stream().noneMatch(x -> Objects.equals(x.getId(), w.getId()))) {
+                        deduped.add(w);
+                        missing--;
+                        if (missing == 0) break;
+                    }
+                }
+                log.debug("After adding S1 words: {} words, missing {}", deduped.size(), missing);
+            }
+
+            // 嘗試 4：補充 S2 單字
+            if (missing > 0 && countS2 > 0) {
+                List<WordState> extraS2 = wordStateRepository.findByUserAndState(
+                        user, "S2", PageRequest.of(0, missing * 2)
+                );
+                for (WordState ws : extraS2) {
+                    Word w = ws.getWord();
+                    if (deduped.stream().noneMatch(x -> Objects.equals(x.getId(), w.getId()))) {
+                        deduped.add(w);
+                        missing--;
+                        if (missing == 0) break;
+                    }
+                }
+                log.debug("After adding S2 words: {} words, missing {}", deduped.size(), missing);
+            }
+
+            // 嘗試 5：補充 S3 單字（最後手段）
+            if (missing > 0 && countS3 > 0) {
+                List<WordState> extraS3 = wordStateRepository.findByUserAndState(
+                        user, "S3", PageRequest.of(0, missing * 2)
+                );
+                for (WordState ws : extraS3) {
+                    Word w = ws.getWord();
+                    if (deduped.stream().noneMatch(x -> Objects.equals(x.getId(), w.getId()))) {
+                        deduped.add(w);
+                        missing--;
+                        if (missing == 0) break;
+                    }
+                }
+                log.debug("After adding S3 words: {} words, missing {}", deduped.size(), missing);
+            }
+
+            if (missing > 0) {
+                log.warn("Still missing {} words after all fallback attempts", missing);
+            } else {
+                log.info("Successfully filled to {} words", deduped.size());
+            }
+        }
+
+        // 嚴格截斷至 limit
         if (deduped.size() > limit) {
-            deduped = new ArrayList<>(deduped.subList(0, limit));  // 只保留前 limit 個
+            deduped = new ArrayList<>(deduped.subList(0, limit));
         }
 
         // ========== 步驟 7：為每個單字標記狀態，並轉換成 DTO ==========
-
-        // 建立單字 ID → 狀態的對應表
         Map<Long, String> stateMap = new HashMap<>();
-        // 標記 S0 單字
         s0Words.forEach(w -> stateMap.put(w.getId(), "S0"));
-        // 標記 S1 單字
+        s_1Words.forEach(w -> stateMap.put(w.getId(), "S-1"));
         s1Words.forEach(w -> stateMap.put(w.getId(), "S1"));
-        // 標記 S2 單字
         s2Words.forEach(w -> stateMap.put(w.getId(), "S2"));
-        // 標記 S3 單字
         s3Words.forEach(w -> stateMap.put(w.getId(), "S3"));
-        // 為所有未標記的單字設定預設狀態 S0（補充的隨機單字）
         deduped.forEach(w -> stateMap.putIfAbsent(w.getId(), "S0"));
 
-        // 隨機打亂單字順序（讓使用者不會看到固定順序）
+        // 隨機打亂順序（保持探索樂趣）
         Collections.shuffle(deduped);
 
-        // 將 Word 實體轉換成 WordDTO，並附帶狀態資訊
+        log.info("Final recommendation for user {}: {} words (S0={}, S-1={}, S1={}, S2={}, S3={})",
+                user.getId(), deduped.size(),
+                s0Words.size(), s_1Words.size(), s1Words.size(), s2Words.size(), s3Words.size());
+
         return deduped.stream()
                 .map(w -> WordDTO.fromEntityWithState(w, stateMap.getOrDefault(w.getId(), "S0")))
                 .collect(Collectors.toList());
     }
 
+    // ==================== 公開方法：閱讀處理（Phase 6）====================
+
     /**
-     * 最大餘數法：按比例分配整數配額
-     * 確保分配後的總和 = total（避免四捨五入造成的誤差）
+     * 處理閱讀事件（v2.0）
      *
-     * @param total 總共要分配的數量
-     * @param ratios 各項目的比例（key=項目名稱, value=比例值）
-     * @return 各項目分配到的整數數量
+     * 業務邏輯：
+     * - 調用 Phase 3 閱讀算法
+     * - 記憶增益較小（ΔM = 0.01 ~ 0.05）
+     * - 次數衰減效果（反覆閱讀增益遞減）
+     *
+     * @param user 使用者
+     * @param wordId 單字 ID
+     * @param durationSeconds 閱讀時長（秒）
+     * @return 更新後的 WordState
      */
+    @Transactional
+    public WordState handleReadingEvent(User user, Long wordId, double durationSeconds) {
+
+        // 🔑 添加唯一請求 ID
+        String requestId = UUID.randomUUID().toString().substring(0, 8);
+
+        log.info("🟢 [{}] handleReadingEvent START: user={}, wordId={}, duration={}s",
+                requestId, user.getId(), wordId, durationSeconds);
+
+        // ========== 步驟 1：查詢單字和狀態 ==========
+        Word word = wordRepository.findById(wordId)
+                .orElseThrow(() -> {
+                    log.error("🔴 [{}] Word not found: wordId={}", requestId, wordId);
+                    return new RuntimeException("Word not found: " + wordId);
+                });
+
+        log.debug("🟢 [{}] Word found: {}", requestId, word.getWordText());
+
+        WordState state = wordStateRepository.findByUserAndWord(user, word)
+                .orElseGet(() -> {
+                    log.debug("🟢 [{}] WordState not found, initializing new state", requestId);
+                    return initializeNewState(user, word);
+                });
+
+        log.debug("🟢 [{}] Current state: {}, strength: {}, readCount: {}",
+                requestId, state.getCurrentState(), state.getMemoryStrength(), state.getReadCount());
+
+        LocalDateTime now = LocalDateTime.now();
+
+        // ========== 步驟 2：記錄閱讀前的狀態 ==========
+        String previousState = state.getCurrentState();
+        double previousStrength = state.getMemoryStrength();
+        int previousReadCount = state.getReadCount();
+
+        // ========== 步驟 3：調用 Phase 3 閱讀算法 ==========
+        double newStrength = algorithmCoreService.calculateNewMemoryStrengthFromReading(
+                state, word, durationSeconds, now
+        );
+
+        log.debug("🟢 [{}] Memory strength: {:.3f} → {:.3f}",
+                requestId, previousStrength, newStrength);
+
+        // ========== 步驟 4：判定新的 FSM 狀態 ==========
+        String newState = algorithmCoreService.determineFsmState(
+                newStrength,
+                state.getHasEverLearned()
+        );
+
+        log.debug("🟢 [{}] FSM state: {} → {}", requestId, previousState, newState);
+
+        // ========== 步驟 5：更新 WordState 的核心欄位 ==========
+        state.setMemoryStrength(newStrength);
+        state.setCurrentState(newState);
+        state.setLastReviewTime(now);
+        state.setLastReadTime(now);
+
+        // ========== 步驟 6：更新閱讀統計 ==========
+        int newCount = state.getReadCount() + 1;
+        state.setReadCount(newCount);
+
+        double newTotal = state.getTotalReadDuration() + durationSeconds;
+        state.setTotalReadDuration(newTotal);
+
+        double newAvg = newTotal / newCount;
+        state.setAvgReadDuration(newAvg);
+
+        log.debug("🟢 [{}] Reading statistics: count: {}→{}, total: {:.1f}s, avg: {:.1f}s",
+                requestId, previousReadCount, newCount, newTotal, newAvg);
+
+        // ========== 步驟 7：保存歷史記錄 ==========
+        log.info("🟢 [{}] Saving review history...", requestId);
+
+        ReviewHistory history = new ReviewHistory();
+        history.setUser(user);
+        history.setWord(word);
+        history.setInteractionType(InteractionType.READ);
+        history.setReviewTime(now);
+        history.setDurationMs((long)(durationSeconds * 1000));
+        history.setIsCorrect(null);
+
+        ReviewHistory savedHistory = reviewHistoryRepository.save(history);
+
+        log.info("🟢 [{}] Review history saved: id={}", requestId, savedHistory.getId());
+
+        // ========== 步驟 8：保存並返回 ==========
+        log.info("🟢 [{}] Saving WordState...", requestId);
+
+        WordState saved = wordStateRepository.save(state);
+
+        log.info("🟢 [{}] handleReadingEvent END: word='{}', duration={:.1f}s, " +
+                        "strength: {:.3f}→{:.3f}, state: {}→{}, read_count: {}→{}",
+                requestId, word.getWordText(), durationSeconds,
+                previousStrength, newStrength,
+                previousState, newState,
+                previousReadCount, newCount);
+
+        return saved;
+    }
+
+    // ==================== 公開方法：學習統計 ====================
+
+    /**
+     * 獲取學習統計摘要
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> getLearningStatsSummary(User user) {
+        Map<String, Object> stats = new HashMap<>();
+
+        List<Object[]> stateStats = wordStateRepository.countByUserGroupByState(user);
+
+        long totalS0 = 0, totalS_1 = 0, totalS1 = 0, totalS2 = 0, totalS3 = 0;
+        for (Object[] row : stateStats) {
+            String state = (String) row[0];
+            Long count = (Long) row[1];
+
+            switch (state) {
+                case "S0":  totalS0 = count; break;
+                case "S-1": totalS_1 = count; break;
+                case "S1":  totalS1 = count; break;
+                case "S2":  totalS2 = count; break;
+                case "S3":  totalS3 = count; break;
+            }
+        }
+
+        stats.put("newWords", totalS0);
+        stats.put("forgottenWords", totalS_1);
+        stats.put("learningWords", totalS1);
+        stats.put("reviewingWords", totalS2);
+        stats.put("masteredWords", totalS3);
+        stats.put("totalLearned", totalS_1 + totalS1 + totalS2 + totalS3);
+
+        log.debug("Learning stats for user {}: {}", user.getId(), stats);
+
+        return stats;
+    }
+
+    // ==================== v2.0 輔助方法 ====================
+
+    /**
+     * 使用輕度優先度排序獲取單字
+     */
+    private List<Word> fetchWordsWithPriority(
+            User user,
+            String state,
+            int targetCount,
+            LocalDateTime currentTime,
+            Supplier<List<WordState>> fetcher) {
+
+        if (targetCount <= 0) {
+            return new ArrayList<>();
+        }
+
+        List<WordState> candidates = fetcher.get();
+
+        if (candidates.isEmpty()) {
+            log.debug("No {} words found for user {}", state, user.getId());
+            return new ArrayList<>();
+        }
+
+        if (candidates.size() <= targetCount) {
+            log.debug("Limited {} candidates ({}), return all", state, candidates.size());
+            return candidates.stream()
+                    .map(WordState::getWord)
+                    .collect(Collectors.toList());
+        }
+
+        Map<Long, Double> priorities = new HashMap<>();
+        for (WordState ws : candidates) {
+            double priority = algorithmCoreService.calculateReviewPriority(
+                    ws, ws.getWord(), currentTime
+            );
+            priorities.put(ws.getWord().getId(), priority);
+        }
+
+        List<WordState> sorted = candidates.stream()
+                .sorted((a, b) -> {
+                    double priorityA = priorities.getOrDefault(a.getWord().getId(), 0.0);
+                    double priorityB = priorities.getOrDefault(b.getWord().getId(), 0.0);
+                    return Double.compare(priorityB, priorityA);
+                })
+                .collect(Collectors.toList());
+
+        int topCount = Math.max((int)(sorted.size() * 0.6), targetCount);
+        List<WordState> topPriority = sorted.subList(0, Math.min(topCount, sorted.size()));
+
+        Collections.shuffle(topPriority);
+
+        List<Word> result = topPriority.stream()
+                .limit(targetCount)
+                .map(WordState::getWord)
+                .collect(Collectors.toList());
+
+        log.debug("Selected {} {} words from {} candidates (top 60% then random)",
+                result.size(), state, candidates.size());
+
+        return result;
+    }
+
+    /**
+     * 初始化新的 WordState
+     */
+    private WordState initializeNewState(User user, Word word) {
+        WordState state = new WordState();
+
+        state.setUser(user);
+        state.setWord(word);
+
+        state.setMemoryStrength(0.0);
+        state.setCurrentState("S0");
+        state.setHasEverLearned(false);
+
+        state.setTotalCorrect(0);
+        state.setTotalIncorrect(0);
+        state.setAverageResponseTimeMs(0L);
+
+        state.setReadCount(0);
+        state.setTotalReadDuration(0.0);
+        state.setAvgReadDuration(0.0);
+
+        state.setForgottenCount(0);
+        state.setLastForgottenTime(null);
+
+        LocalDateTime now = LocalDateTime.now();
+        state.setLastReviewTime(now);
+        state.setLastReadTime(null);
+
+        state.setNextReviewPriority(0.0);
+
+        log.debug("Initialized new WordState: user={}, word='{}', state=S0, strength=0.0",
+                user.getId(), word.getWordText());
+
+        return state;
+    }
+
+    // ==================== 原有工具方法 ====================
+
     private Map<String, Integer> distributeCounts(int total, Map<String, Double> ratios) {
-        // 使用 LinkedHashMap 保持插入順序
         Map<String, Integer> result = new LinkedHashMap<>();
 
-        // 邊界檢查：如果總數 <= 0 或比例為空
         if (total <= 0 || ratios == null || ratios.isEmpty()) {
-            // 將所有項目設為 0
             if (ratios != null) ratios.keySet().forEach(k -> result.put(k, 0));
             return result;
         }
 
-        // 計算所有比例的總和
         double sum = ratios.values().stream().mapToDouble(Double::doubleValue).sum();
 
-        // 如果比例總和 <= 0，無法分配
         if (sum <= 0) {
             ratios.keySet().forEach(k -> result.put(k, 0));
             return result;
         }
 
-        // 內部類別：用來記錄每個項目的小數餘數
         class Part {
-            String key;   // 項目名稱
-            double frac;  // 小數餘數
+            String key;
+            double frac;
             Part(String k, double f) {
                 key = k;
                 frac = f;
             }
         }
 
-        List<Part> fracs = new ArrayList<>();  // 存放所有餘數資訊
-        int allocated = 0;  // 已分配的總數
+        List<Part> fracs = new ArrayList<>();
+        int allocated = 0;
 
-        // ========== 階段一：分配整數部分 ==========
         for (Map.Entry<String, Double> e : ratios.entrySet()) {
-            // 計算該項目的精確配額（可能有小數）
             double exact = total * (e.getValue() / sum);
-
-            // 向下取整，得到整數部分
             int base = (int) Math.floor(exact);
-
-            // 計算小數餘數
             double rem = exact - base;
-
-            // 先分配整數部分
             result.put(e.getKey(), base);
-
-            // 記錄餘數（後續用來分配剩餘配額）
             fracs.add(new Part(e.getKey(), rem));
-
-            // 累計已分配數量
             allocated += base;
         }
 
-        // ========== 階段二：分配剩餘配額 ==========
-
-        // 計算還有多少沒分配
         int remain = total - allocated;
-
-        // 按餘數大小降序排列（餘數越大越優先）
         fracs.sort((a, b) -> Double.compare(b.frac, a.frac));
 
-        // 將剩餘配額一個一個分給餘數最大的項目
         for (int i = 0; i < remain && i < fracs.size(); i++) {
-            String k = fracs.get(i).key;  // 取得項目名稱
-            result.put(k, result.get(k) + 1);  // 該項目 +1
+            String k = fracs.get(i).key;
+            result.put(k, result.get(k) + 1);
         }
 
         return result;
     }
 
-    /**
-     * 建立分頁參數
-     * @param size 頁面大小（取幾筆資料）
-     * @return Pageable 物件（第 0 頁，size 筆資料）
-     */
     private Pageable page(int size) {
-        // 確保 size 至少為 1（避免無效查詢）
         return PageRequest.of(0, Math.max(1, size));
     }
 
-    /**
-     * 根據 ID 去重（保留第一次出現的單字）
-     * @param list 可能包含重複單字的列表
-     * @return 去重後的列表
-     */
     private List<Word> deduplicateById(List<Word> list) {
-        Set<Long> seen = new HashSet<>();  // 記錄已看過的 ID
-        List<Word> out = new ArrayList<>(list.size());  // 結果列表
+        Set<Long> seen = new HashSet<>();
+        List<Word> out = new ArrayList<>(list.size());
 
         for (Word w : list) {
-            // 跳過 null 或沒有 ID 的單字
             if (w == null || w.getId() == null) continue;
-
-            // 如果這個 ID 第一次出現（add 回傳 true）
             if (seen.add(w.getId())) {
-                out.add(w);  // 加入結果列表
+                out.add(w);
             }
-            // 如果 ID 已存在，seen.add() 回傳 false，不加入
         }
 
         return out;
+    }
+
+    private double sigmoid(double x, double x0, double k) {
+        return 1.0 / (1.0 + Math.exp(-k * (x - x0)));
     }
 }

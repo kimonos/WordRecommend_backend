@@ -7,6 +7,11 @@ import java.util.Optional;
 public interface UserRepository extends JpaRepository<User, Long> {
     // Spring Security 登入時需要透過使用者名稱找到使用者
     Optional<User> findByUsername(String username);
-    Boolean existsByUsername(String username); // 新增：方便檢查使用者是否存在
-    Boolean existsByEmail(String email);     // 新增：方便檢查 Email 是否存在
+    Optional<User> findByUsernameIgnoreCase(String username); // 暱稱（你現在的 username）
+    Optional<User> findByEmailIgnoreCase(String email);
+    Optional<User> findByEmailIgnoreCaseOrUsernameIgnoreCase(String email, String username);
+//    Boolean existsByUsername(String username); // 新增：方便檢查使用者是否存在
+//    Boolean existsByEmail(String email);     // 新增：方便檢查 Email 是否存在
+    boolean existsByUsernameIgnoreCase(String username);
+    boolean existsByEmailIgnoreCase(String email);
 }

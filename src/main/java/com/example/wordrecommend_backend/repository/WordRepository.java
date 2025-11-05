@@ -26,6 +26,11 @@ public interface WordRepository extends JpaRepository<Word, Long> {
     List<Word> findNewWordsByLevel(@Param("user") User user,
                                    @Param("level") String level,
                                    Pageable pageable);
+    @Query("SELECT COUNT(w) FROM Word w " +
+            "WHERE w.id NOT IN (" +
+            "  SELECT ws.word.id FROM WordState ws WHERE ws.user = :user" +
+            ")")
+    long countNewWords(@Param("user") User user);
 
 
 //        @Query("""

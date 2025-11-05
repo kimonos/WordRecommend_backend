@@ -5,6 +5,7 @@ import lombok.Data;
 @Data
 public class ReviewFeedbackRequest {
     private Long wordId;
-    private boolean isCorrect;
+    private String selectedAnswer;
+//    private boolean isCorrect;
     private long answerTimeMs;
 }

@@ -23,7 +23,7 @@ public class User implements UserDetails {
     @Column(unique = true, nullable = false)
     private String username;
 
-    @Column(nullable = false)
+    @Column(nullable = true)
     private String password;
 
     @Column(unique = true, nullable = false)
@@ -36,6 +36,19 @@ public class User implements UserDetails {
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();
     }
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "auth_provider", nullable = false)
+    private AuthProvider provider = AuthProvider.LOCAL;
+
+    @Column(name = "provider_id")      // 如 Google sub、GitHub id
+    private String providerId;
+
+    @Column(name = "avatar_url")
+    private String avatarUrl;
+
+    @Column(name = "email_verified")
+    private Boolean emailVerified = false;
 
     // 以下是 UserDetails 介面的實作方法
     @Override

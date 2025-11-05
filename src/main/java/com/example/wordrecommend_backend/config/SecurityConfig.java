@@ -1,10 +1,12 @@
 package com.example.wordrecommend_backend.config;
 
 import com.example.wordrecommend_backend.filter.JwtRequestFilter;
-import com.example.wordrecommend_backend.repository.UserRepository;
+import com.example.wordrecommend_backend.service.CustomOAuth2UserService;
+import com.example.wordrecommend_backend.service.CustomOidcUserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -15,10 +17,10 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.core.userdetails.UserDetailsService;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 @Configuration
@@ -27,30 +29,52 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
 
     // *** 變更點 1：從這裡移除 private final JwtRequestFilter jwtRequestFilter; ***
-    private final UserRepository userRepository;
+    private final UserDetailsService userDetailsService;
+
+    private final CustomOAuth2UserService customOAuth2UserService;
+    private final CustomOidcUserService customOidcUserService;
+    private final OAuth2AuthenticationSuccessHandler oAuth2SuccessHandler;
+    private final OAuth2AuthenticationFailureHandler oAuth2FailureHandler;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtRequestFilter jwtRequestFilter) throws Exception {
         http
                 .cors(Customizer.withDefaults())
-                // 1. CSRF 設定：使用 Lambda 風格
                 .csrf(AbstractHttpConfigurer::disable)
-
-                // 2. HTTP 請求授權設定
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/auth/register", "/auth/login").permitAll() // 開放註冊和登入
-                        .anyRequest().authenticated() // 其他所有請求都需要驗證
+                        .requestMatchers(
+                                "/auth/**",
+                                "/oauth2/**",
+                                "/login/oauth2/**",
+                                "/oauth2/authorization/**"
+                        ).permitAll()
+                        .anyRequest().authenticated()
                 )
 
-                // 3. Session 管理設定：設定為無狀態
-                .sessionManagement(session -> session
-                        .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
-                )
+                .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .securityContext(sc -> sc.requireExplicitSave(true))
 
-                // 4. 設定自訂的 AuthenticationProvider
+                // 你原本的帳密驗證提供者
                 .authenticationProvider(authenticationProvider())
 
-                // 5. 加入 JWT 過濾器
+                .exceptionHandling(e -> e.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
+
+                // ▲ 新增：啟用 OAuth2 Login，並接上自訂的 UserService 與成功/失敗處理器
+                .oauth2Login(oauth -> oauth
+                        .userInfoEndpoint(u -> u
+                                .userService(customOAuth2UserService)     // ★ GitHub 走這個
+                                .oidcUserService(customOidcUserService)   // ★ Google 走這個
+                        )
+                        .successHandler(oAuth2SuccessHandler)
+                        .failureHandler(oAuth2FailureHandler)
+                )
+
+
+
+                // 若同時有 formLogin 可視需求關掉
+                .formLogin(AbstractHttpConfigurer::disable)
+
+                // 你原本的 JWT 過濾器（必須放在 UsernamePasswordAuthenticationFilter 之前）
                 .addFilterBefore(jwtRequestFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
@@ -59,7 +83,7 @@ public class SecurityConfig {
     @Bean
     public AuthenticationProvider authenticationProvider() {
         DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
-        authProvider.setUserDetailsService(userDetailsService());
+        authProvider.setUserDetailsService(userDetailsService);
         authProvider.setPasswordEncoder(passwordEncoder());
         return authProvider;
     }
@@ -69,11 +93,6 @@ public class SecurityConfig {
         return config.getAuthenticationManager();
     }
 
-    @Bean
-    public UserDetailsService userDetailsService() {
-        return username -> userRepository.findByUsername(username)
-                .orElseThrow(() -> new UsernameNotFoundException("User not found with username: " + username));
-    }
 
     @Bean
     public PasswordEncoder passwordEncoder() {
