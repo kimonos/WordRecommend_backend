@@ -113,29 +113,58 @@ public class AlgorithmCoreService {
     }
 
     /**
-     * 輔助方法：根據新的記憶強度，決定 FSM 狀態
+     * 根據新的記憶強度決定 FSM 狀態（v2.2 - 最終修復版）
+     *
+     * 狀態轉移邏輯：
+     * - strength >= 0.6：S3（精通）
+     * - 0.4 <= strength < 0.6：S2（複習中）
+     * - 0.0 < strength < 0.4：
+     *     - 如果 hasEverLearned = true → S-1（已遺忘）
+     *     - 如果 hasEverLearned = false → S1（學習中）
+     * - strength <= 0.0：
+     *     - 如果 hasEverLearned = true → S-1（已遺忘）
+     *     - 如果 hasEverLearned = false → S0（新單字）
      */
     public String determineFsmState(double strength, boolean hasEverLearned) {
-        // 確保 strength 在有效範圍內
+
         strength = clamp(strength, 0.0, 1.0);
 
+        log.info("🟠 ========== FSM 狀態判定 ==========");
+        log.info("記憶強度: {:.4f}", strength);
+        log.info("曾經學過: {}", hasEverLearned);
+        log.info("S3 閾值: {:.2f}", config.getThresholdS3());
+        log.info("S2 閾值: {:.2f}", config.getThresholdS2());
+
+        String result;
+
         if (strength >= config.getThresholdS3()) {
-            return "S3"; // 精通
+            result = "S3";
+            log.info("✅ 決定: S3（strength >= S3 閾值）");
         } else if (strength >= config.getThresholdS2()) {
-            return "S2"; // 熟悉
+            result = "S2";
+            log.info("✅ 決定: S2（strength >= S2 閾值）");
         } else if (strength > 0.0) {
-            return "S1"; // 初學/不熟
-        } else {
-            // 🔑 關鍵區分點：記憶強度為 0 時
             if (hasEverLearned) {
-                log.debug("Word identified as S-1 (forgotten): strength=0, has_ever_learned=true");
-                return "S-1"; // 遺忘
+                result = "S-1";
+                log.info("✅ 決定: S-1（0 < strength, hasEverLearned=true）");
             } else {
-                log.debug("Word identified as S0 (new): strength=0, has_ever_learned=false");
-                return "S0"; // 新單字
+                result = "S1";
+                log.info("✅ 決定: S1（0 < strength, hasEverLearned=false）");
+            }
+        } else {
+            if (hasEverLearned) {
+                result = "S-1";
+                log.info("✅ 決定: S-1（strength <= 0, hasEverLearned=true）");
+            } else {
+                result = "S0";
+                log.info("✅ 決定: S0（strength <= 0, hasEverLearned=false）");
             }
         }
+
+        log.info("🟠 ========== FSM 狀態判定結束 ==========");
+        return result;
     }
+
     public String determineFsmState(WordState state) {
         return determineFsmState(state.getMemoryStrength(), state.getHasEverLearned());
     }

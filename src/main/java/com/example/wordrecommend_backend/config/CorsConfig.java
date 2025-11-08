@@ -22,8 +22,8 @@ public class CorsConfig {
         // ❶ 允許的來源（請精準白名單；部署後加你的正式網域）
         // 這裡用 allowedOriginPatterns 是為了未來可支援子網域（若需要）
         c.setAllowedOriginPatterns(List.of(
-                "http://localhost:5173"      // 本機開發
-                // "https://app.example.com" // 上線網域（之後加）
+//                "http://localhost:5173",      // 本機開發
+                 "https://wordrecommend.me" // 上線網域（之後加）
         ));
 
         // ❷ 允許的方法（含 OPTIONS，讓 Preflight 能過）

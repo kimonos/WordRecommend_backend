@@ -31,7 +31,7 @@ public class OAuth2AuthenticationSuccessHandler implements AuthenticationSuccess
     @Value("${app.security.jwt.cookie-name:APP_TOKEN}")
     private String cookieName;
 
-    @Value("${app.security.frontend-url:http://localhost:5173}")
+    @Value("${app.security.frontend-url:https://wordrecommend.me}")
     private String frontendUrl;
 
     @Override

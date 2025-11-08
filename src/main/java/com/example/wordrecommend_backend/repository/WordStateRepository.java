@@ -230,4 +230,14 @@ public interface WordStateRepository extends JpaRepository<WordState, Long> {
             "         AND ws.totalCorrect * 1.0 / (ws.totalCorrect + ws.totalIncorrect) < 0.5)) " +
             "ORDER BY ws.forgottenCount DESC, ws.lastReviewTime ASC")
     List<WordState> findDifficultWords(@Param("user") User user, Pageable pageable);
+
+    /**
+     * 根據使用者查詢所有 WordState（衰減任務用）
+     *
+     * @param user 使用者
+     * @return 該使用者的所有 WordState
+     */
+    List<WordState> findByUser(User user);
+
+
 }

@@ -379,6 +379,7 @@ public class RecommendationService {
         String previousState = state.getCurrentState();
         double previousStrength = state.getMemoryStrength();
         int previousReadCount = state.getReadCount();
+        boolean prevEver = Boolean.TRUE.equals(state.getHasEverLearned());
 
         // ========== 步驟 3：調用 Phase 3 閱讀算法 ==========
         double newStrength = algorithmCoreService.calculateNewMemoryStrengthFromReading(
@@ -395,6 +396,14 @@ public class RecommendationService {
         );
 
         log.debug("🟢 [{}] FSM state: {} → {}", requestId, previousState, newState);
+
+        if ("S0".equals(previousState)) {
+            newState = "S1";
+            if (!Boolean.TRUE.equals(state.getHasEverLearned())) {
+                state.setHasEverLearned(true);
+            }
+            log.info("🟢 [{}] Promote by reading: S0 → S1, hasEverLearned set to true", requestId);
+        }
 
         // ========== 步驟 5：更新 WordState 的核心欄位 ==========
         state.setMemoryStrength(newStrength);
